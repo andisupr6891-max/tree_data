@@ -1,0 +1,135 @@
+@import "tailwindcss";
+
+/* ── TREE DATA v3.0.0 — Retro Tetris Global Styles ─────────────────────────── */
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: #020804;
+  color: #e0e0e0;
+  font-family: 'Share Tech Mono', 'Courier New', monospace;
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: #010602;
+}
+::-webkit-scrollbar-thumb {
+  background: #00FFD133;
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #00FFD166;
+}
+
+/* Fade-in animation for log entries */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 4px currentColor; }
+  50%       { box-shadow: 0 0 16px currentColor; }
+}
+
+@keyframes scanline {
+  0%   { top: -100%; }
+  100% { top: 100%; }
+}
+
+@keyframes matrix-rain {
+  0%   { transform: translateY(-100%); opacity: 1; }
+  100% { transform: translateY(100vh); opacity: 0; }
+}
+
+@keyframes blink-cursor {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+/* Tetris block pixel effect */
+.pixel-border {
+  image-rendering: pixelated;
+  border-style: solid;
+}
+
+/* Neon text glow utility classes */
+.text-glow-cyan  { text-shadow: 0 0 10px #00FFD1, 0 0 20px #00FFD155; }
+.text-glow-gold  { text-shadow: 0 0 10px #FFD700, 0 0 20px #FFD70055; }
+.text-glow-green { text-shadow: 0 0 10px #4ADE80, 0 0 20px #4ADE8055; }
+.text-glow-red   { text-shadow: 0 0 10px #FF6B6B, 0 0 20px #FF6B6B55; }
+
+/* CRT screen effect */
+.crt-screen {
+  position: relative;
+  overflow: hidden;
+}
+.crt-screen::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 255, 209, 0.015) 2px,
+    rgba(0, 255, 209, 0.015) 4px
+  );
+  pointer-events: none;
+  z-index: 100;
+}
+
+/* Tetris-style grid background */
+.tetris-grid {
+  background-image:
+    linear-gradient(rgba(0, 255, 209, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 255, 209, 0.03) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* Pulsing border animation */
+.pulse-border {
+  animation: pulse-border 2s ease-in-out infinite;
+}
+@keyframes pulse-border {
+  0%, 100% { border-color: rgba(0, 255, 209, 0.2); }
+  50%       { border-color: rgba(0, 255, 209, 0.6); }
+}
+
+/* Terminal cursor blink */
+.cursor::after {
+  content: '█';
+  animation: blink-cursor 1s step-end infinite;
+  color: #00FFD1;
+}
+
+/* Retro button press effect */
+button:active {
+  transform: scale(0.96);
+}
+
+/* Canvas rendering optimization */
+canvas {
+  image-rendering: crisp-edges;
+  image-rendering: -webkit-optimize-contrast;
+}
+
+/* Custom selection color */
+::selection {
+  background: #00FFD133;
+  color: #00FFD1;
+}
