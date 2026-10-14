@@ -1,0 +1,6 @@
+# CONTOH format jadwal berita untuk EA SAPU JAGAD (waktu GMT). Ganti dengan jadwal asli.
+# kolom: waktu_gmt,mata_uang,dampak,judul   (baris diawali # diabaikan)
+time_gmt,currency,impact,title
+2026.10.02 12:30,USD,HIGH,Non-Farm Employment Change
+2026.10.02 12:30,USD,HIGH,Unemployment Rate
+2026.10.14 12:30,USD,HIGH,CPI m/m
