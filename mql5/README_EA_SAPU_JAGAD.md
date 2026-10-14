@@ -1,8 +1,10 @@
-# EA SAPU JAGAD v1.20 — Grid Adaptif-Rezim XAUUSD (MetaTrader 5)
+# EA SAPU JAGAD v1.30 — Grid Adaptif-Rezim + Mesin ALPHA (ML) XAUUSD (MetaTrader 5)
 
 EA ini dibangun dari pengamatan dua video. Logika di keduanya ditiru, lalu digabung oleh **detektor rezim pasar**. Ada juga lapisan kecerdasan untuk sesi, rilis berita, dan volatilitas.
 
 > **STATUS: GAGAL uji data emas asli (Mei 2011 – Juni 2018, ±7,1 tahun).** Dengan pengaturan default, EA ini menghabiskan akun $10.000 baik di periode 2011–2014 maupun 2015–2018. Tiruan kedua video juga jebol di salah satu periode. Jangan dipakai di akun uang nyata. Rincian dan cara mengujinya dengan data Anda sendiri ada di bagian 4 dan 5.
+>
+> **Mesin ALPHA (v1.30)** adalah model machine learning yang menemukan sinyal arah 4 jam yang nyata tetapi kecil di data 2011–2018. Setelah biaya spread, model ini **TIDAK LOLOS** uji holdout (lihat bagian 8 dan `Hasil_Uji/RISET_ALPHA.md`). EA hanya trading dengan model berstatus LOLOS. Latih ulang dengan data terbaru Anda memakai `sapu_jagad_alpha.py`.
 
 | File | Fungsi |
 |---|---|
@@ -11,7 +13,11 @@ EA ini dibangun dari pengamatan dua video. Logika di keduanya ditiru, lalu digab
 | `Presets/EA_SAPU_JAGAD_Tiruan_Video.set` | Tiruan video 1, tanpa proteksi, hanya untuk pembanding |
 | `Presets/EA_SAPU_JAGAD_Tiruan_Video2.set` | Tiruan video 2, tanpa proteksi, hanya untuk pembanding |
 | `Files/sapu_jagad_news.csv` | Contoh format jadwal berita untuk backtest (ganti dengan jadwal asli) |
-| `tools/sapu_jagad_forensik.py` | Alat uji forensik / replay / sweep / walk-forward untuk dataset Anda |
+| `tools/sapu_jagad_forensik.py` | Alat uji forensik / replay / sweep / walk-forward / uji ketahanan untuk dataset Anda |
+| `tools/sapu_jagad_alpha.py` | Riset, validasi, dan ekspor model alpha ML untuk Mesin ALPHA |
+| `Files/sapu_jagad_alpha.txt` | Model alpha hasil data 2011–2018 (status **TIDAK LOLOS**, EA hanya memantau) |
+| `Hasil_Uji/` | Laporan uji data asli 2011–2018 dan `RISET_ALPHA.md` |
+| `windows/*.bat` | Salin paket ke `D:\sapujagad`, jalankan forensik, jalankan riset alpha |
 
 ---
 
@@ -56,7 +62,7 @@ di antaranya -> NETRAL : tidak membuka basket baru (pasar acak = tidak ada edge)
 
 ---
 
-## 2. Arsitektur EA v1.20
+## 2. Arsitektur EA v1.30
 
 ```
                 ┌──────────────────────── DETEKTOR REZIM (ER M1, z-score M5, EMA H1) ─────────────────┐
@@ -69,6 +75,8 @@ di antaranya -> NETRAL : tidak membuka basket baru (pasar acak = tidak ada edge)
                      · spread · margin · cut loss basket (% saldo) · penuaan basket · larangan tambah
                        melawan tren · kunci profit · drawdown global & batas harian · tutup Jumat
 ```
+
+Mesin ALPHA (v1.30) berjalan terpisah dari ketiga mesin grid (magic + 3), dengan satu posisi pada satu waktu. Lihat bagian 8.
 
 ---
 
@@ -189,6 +197,7 @@ Alur kalibrasi yang disarankan:
 3. Untuk backtest berita, salin `Files/sapu_jagad_news.csv` (isi dengan jadwal asli, **waktu GMT**) ke folder **Common\Files** terminal (`File > Open Data Folder`, naik ke `..\..\Common\Files`).
 4. Pasang EA di chart XAUUSD (timeframe bebas; logika berjalan per tick), aktifkan **Algo Trading**, lalu muat preset.
 5. Akun **hedging** disarankan. Di akun netting, posisi digabung dan EA memberi peringatan.
+6. Untuk Mesin ALPHA, salin `Files/sapu_jagad_alpha.txt` (atau model hasil latih Anda) ke folder **Common\Files**. Tanpa file ini, Mesin ALPHA diam.
 
 Atur zona waktu sesuai broker: `InpGMTOffset` (-99 = otomatis saat live) dan `InpTesterGMTOffset` (wajib diisi saat backtest).
 
@@ -211,7 +220,40 @@ Semua jarak ditulis dalam **satuan harga** (0.50 = 50 sen), sehingga aman untuk 
 
 ---
 
-## 8. Batasan & peringatan
+## 8. Mesin ALPHA (model ML) — cara kerja singkat
+
+1. **Setiap candle M15 tutup**, EA menghitung 45 fitur:
+   - bobot dan anatomi 3 candle terakhir: badan, sumbu, posisi close, range/ATR, volume tick, badan × volume
+   - momentum 8 horizon
+   - volatilitas dan rezim
+   - jarak ke EMA 20/50/200
+   - posisi di channel Donchian
+   - jam GMT dan New York (DST)
+   - menit sejak 08:30 New York
+2. **Perhitungan peluang:** 300 pohon LightGBM dari file model dievaluasi langsung di MQL5, tanpa ONNX. Hasilnya peluang harga naik dalam horizon model (default 4 jam).
+3. **Entry:** bila |peluang − 0,5| ≥ ambang dari file model, EA membuka satu posisi (magic + 3) searah sinyal, dengan stop pengaman 6×ATR96 M15.
+4. **Exit:** posisi ditutup tepat setelah horizon model berlalu.
+5. **Kunci validasi:** model berstatus **TIDAK LOLOS** hanya dipantau (peluang tampil di panel, tanpa trading), kecuali `InpAlphaAllowUnvalidated=true`.
+
+Melatih model dengan data Anda:
+
+```bat
+pip install pandas numpy lightgbm
+python Tools\sapu_jagad_alpha.py --data "D:\dataset\XAUUSD_M1.csv" --gmt-offset 2 --out D:\sapujagad\hasil_alpha
+```
+
+Pipeline otomatis menjalankan alur berikut:
+- membagi data menjadi penemuan (70%) dan holdout (30%)
+- memilih horizon dan ambang di periode penemuan saja
+- menguji sekali di holdout
+- memberi vonis **LOLOS** bila total bersih > 0 dan t ≥ 2
+- mengekspor model final
+
+Parameter Mesin ALPHA: `InpAlphaEnable`, `InpAlphaModelFile`, `InpAlphaAllowUnvalidated`, `InpAlphaLotMult`, `InpAlphaSLATR`, `InpAlphaDumpFeatures` (untuk uji paritas, lihat `Hasil_Uji/RISET_ALPHA.md`).
+
+---
+
+## 9. Batasan & peringatan
 
 - **EA belum dikompilasi di lingkungan pembuatannya** karena MetaEditor tidak tersedia di container cloud. Kode sudah diperiksa statis (kurung, fungsi, jumlah argumen). Bila MetaEditor menampilkan error atau warning saat Compile, kirimkan pesannya untuk diperbaiki.
 - Alat forensik meniru logika EA, tetapi **bukan pengganti** Strategy Tester. Slippage, swap, margin, dan eksekusi broker nyata bisa berbeda.

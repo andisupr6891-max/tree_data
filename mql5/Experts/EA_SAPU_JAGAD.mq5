@@ -17,12 +17,16 @@
 //|  volatilitas/burst/rollover/pembukaan sesi, profil sesi,         |
 //|  kunci profit, recovery, cut loss basket, larangan menambah      |
 //|  melawan tren, proteksi drawdown, berita via CSV untuk backtest. |
+//|                                                                  |
+//|  v1.30 MESIN ALPHA: model LightGBM dari sapu_jagad_alpha.py,     |
+//|  45 fitur candle M15 (bobot candle, momentum, rezim, waktu),     |
+//|  trading hanya bila file model berstatus LOLOS validasi.         |
 //+------------------------------------------------------------------+
 #property copyright   "EA SAPU JAGAD"
-#property version     "1.20"
+#property version     "1.30"
 #property description "EA SAPU JAGAD - grid adaptif-rezim XAUUSD"
 #property description "Momentum (stop) + Reversion (limit) + Berita, dipilih oleh detektor rezim"
-#property description "dengan kecerdasan sesi, berita, volatilitas, dan proteksi risiko."
+#property description "dengan kecerdasan sesi, berita, volatilitas, proteksi risiko, dan Mesin ALPHA (model ML)."
 
 #include <Trade\Trade.mqh>
 
@@ -211,13 +215,21 @@ input group "=== FILTER TREN H1 ==="
 input ENUM_TIMEFRAMES   InpTrendTF           = PERIOD_H1;     // Timeframe tren
 input int               InpTrendEMA          = 50;            // Periode EMA tren
 
+input group "=== MESIN ALPHA (model ML dari sapu_jagad_alpha.py) ==="
+input bool              InpAlphaEnable       = true;          // Aktifkan Mesin ALPHA
+input string            InpAlphaModelFile    = "sapu_jagad_alpha.txt"; // File model di folder Common\Files
+input bool              InpAlphaAllowUnvalidated = false;     // Izinkan trading walau model TIDAK LOLOS validasi (berisiko)
+input double            InpAlphaLotMult      = 1.0;           // Pengali lot posisi alpha
+input double            InpAlphaSLATR        = 6.0;           // Stop pengaman = X x ATR96 M15 (0 = mati)
+input bool              InpAlphaDumpFeatures = false;         // Tulis fitur ke CSV (uji paritas EA vs Python)
+
 input group "=== LAIN-LAIN ==="
 input bool              InpShowPanel         = true;          // Tampilkan panel info
 input bool              InpDeletePendingOnRemove = true;      // Hapus pending saat EA dilepas dari chart
 
 //--- slot basket: 0/1 momentum BUY/SELL (stop), 2/3 berita BUY/SELL (stop), 4/5 reversion BUY/SELL (limit)
 #define SLOT_COUNT  6
-#define PANEL_LINES 16
+#define PANEL_LINES 17
 
 struct SBasket
   {
@@ -681,6 +693,7 @@ void CloseAll(const string reason, const bool halt)
      }
    for(int s = 0; s < SLOT_COUNT; s++)
       StartClose(s, reason, halt);
+   AlphaCloseIfAny(reason);
   }
 
 //+------------------------------------------------------------------+
@@ -1092,7 +1105,7 @@ void UpdateDaily()
       if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol)
          continue;
       ulong magic = (ulong)HistoryDealGetInteger(deal, DEAL_MAGIC);
-      if(magic < InpMagic || magic > InpMagic + 2)
+      if(magic < InpMagic || magic > InpMagic + 3)
          continue;
       sum += HistoryDealGetDouble(deal, DEAL_PROFIT) + HistoryDealGetDouble(deal, DEAL_SWAP) +
              HistoryDealGetDouble(deal, DEAL_COMMISSION) + HistoryDealGetDouble(deal, DEAL_FEE);
@@ -1188,6 +1201,7 @@ bool GlobalProtection(const SEnv &e, const SBasket &b[])
       if(b[s].positions + b[s].pendings > 0)
          anyOpen = true;
      }
+   floating += AlphaFloating();
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
 
    if(e.halted)
@@ -1704,6 +1718,546 @@ void ManageNewsLadder(const int s, const SBasket &b, const SEnv &e)
   }
 
 //+------------------------------------------------------------------+
+//| Mesin ALPHA: model ML (LightGBM) hasil sapu_jagad_alpha.py       |
+//| Fitur dihitung dari candle M15 yang sudah tutup, IDENTIK dengan  |
+//| compute_features() di Python. Model dibaca dari file teks.       |
+//+------------------------------------------------------------------+
+#define ALPHA_NFEAT 45
+#define ALPHA_BARS  2000
+string ALPHA_FEATURES = "body_0,uwick_0,lwick_0,clv_0,rngatr_0,vol_0,wbody_0,body_1,uwick_1,lwick_1,clv_1,rngatr_1,vol_1,wbody_1,body_2,uwick_2,lwick_2,clv_2,rngatr_2,vol_2,wbody_2,ret_1,ret_2,ret_4,ret_8,ret_16,ret_32,ret_96,ret_480,volratio,er_16,er_96,vr_4,z_ema_20,z_ema_50,z_ema_200,don_32,don_96,don_480,gmt_sin,gmt_cos,ny_sin,ny_cos,dow,min_since_830";
+
+bool     g_aLoaded    = false;
+bool     g_aValidated = false;
+int      g_aHorizon   = 240;
+double   g_aCut       = 1.0;
+string   g_aSummary   = "";
+string   g_aStatus    = "-";
+datetime g_aLastBar   = 0;
+double   g_aLastProb  = 0.5;
+int      g_aTreeRoot[];
+int      g_aNodeStart[];
+int      g_aLeafStart[];
+int      g_aNodeFeat[];
+double   g_aNodeThr[];
+int      g_aNodeLeft[];
+int      g_aNodeRight[];
+int      g_aNodeDefLeft[];
+int      g_aNodeMiss[];
+double   g_aLeaf[];
+
+ulong AlphaMagic() { return InpMagic + 3; }
+
+double SafeDiv(const double a, const double d)
+  {
+   if(d > 0.0)
+      return a / d;
+   return 0.0;
+  }
+
+// rata-rata a[end-p+1 .. end]
+double SmaEnd(const double &a[], const int end, const int p)
+  {
+   if(end - p + 1 < 0)
+      return 0.0;
+   double sum = 0.0;
+   for(int i = end - p + 1; i <= end; i++)
+      sum += a[i];
+   return sum / p;
+  }
+
+// varians sampel (ddof = 1) dari a[end-p+1 .. end]
+double SampleVarEnd(const double &a[], const int end, const int p)
+  {
+   if(end - p + 1 < 0 || p < 2)
+      return 0.0;
+   double m = SmaEnd(a, end, p);
+   double ss = 0.0;
+   for(int i = end - p + 1; i <= end; i++)
+      ss += (a[i] - m) * (a[i] - m);
+   return ss / (p - 1);
+  }
+
+// jam musim panas AS: Minggu ke-2 Maret 07:00 UTC s/d Minggu pertama November 06:00 UTC
+bool UsDstActive(const datetime utc)
+  {
+   MqlDateTime t;
+   TimeToStruct(utc, t);
+   MqlDateTime s;
+   s.year = t.year;
+   s.mon  = 3;
+   s.day  = 1;
+   s.hour = 0;
+   s.min  = 0;
+   s.sec  = 0;
+   datetime mar1 = StructToTime(s);
+   MqlDateTime w;
+   TimeToStruct(mar1, w);
+   int firstSun = 1 + (7 - w.day_of_week) % 7;
+   datetime dstStart = mar1 + (firstSun - 1 + 7) * 86400 + 7 * 3600;
+   s.mon = 11;
+   datetime nov1 = StructToTime(s);
+   TimeToStruct(nov1, w);
+   firstSun = 1 + (7 - w.day_of_week) % 7;
+   datetime dstEnd = nov1 + (firstSun - 1) * 86400 + 6 * 3600;
+   return (utc >= dstStart && utc < dstEnd);
+  }
+
+bool AlphaLoadModel()
+  {
+   g_aLoaded = false;
+   int h = FileOpen(InpAlphaModelFile, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ);
+   if(h == INVALID_HANDLE)
+     {
+      g_aStatus = "file model tidak ditemukan";
+      PrintFormat("[SAPU JAGAD] Alpha: file %s tidak ada di Common\\Files (err %d).", InpAlphaModelFile, GetLastError());
+      return false;
+     }
+   string head = FileReadString(h);
+   if(StringFind(head, "SAPUJAGAD_ALPHA") != 0)
+     {
+      FileClose(h);
+      g_aStatus = "format file model salah";
+      return false;
+     }
+   int nTrees = 0;
+   string feats = "";
+   while(!FileIsEnding(h))
+     {
+      string line = FileReadString(h);
+      int eq = StringFind(line, "=");
+      if(eq <= 0)
+         continue;
+      string key = StringSubstr(line, 0, eq);
+      string val = StringSubstr(line, eq + 1);
+      if(key == "validated")
+         g_aValidated = (StringToInteger(val) == 1);
+      else
+         if(key == "horizon_min")
+            g_aHorizon = (int)StringToInteger(val);
+         else
+            if(key == "cut")
+               g_aCut = StringToDouble(val);
+            else
+               if(key == "features")
+                  feats = val;
+               else
+                  if(key == "summary")
+                     g_aSummary = val;
+                  else
+                     if(key == "trees")
+                       {
+                        nTrees = (int)StringToInteger(val);
+                        break;
+                       }
+     }
+   if(feats != ALPHA_FEATURES || nTrees <= 0 || g_aHorizon <= 0)
+     {
+      FileClose(h);
+      g_aStatus = "model tidak cocok dengan versi EA";
+      Print("[SAPU JAGAD] Alpha: daftar fitur/format model tidak cocok dengan EA ini.");
+      return false;
+     }
+   ArrayResize(g_aTreeRoot, nTrees);
+   ArrayResize(g_aNodeStart, nTrees);
+   ArrayResize(g_aLeafStart, nTrees);
+   ArrayResize(g_aNodeFeat, 0);
+   ArrayResize(g_aNodeThr, 0);
+   ArrayResize(g_aNodeLeft, 0);
+   ArrayResize(g_aNodeRight, 0);
+   ArrayResize(g_aNodeDefLeft, 0);
+   ArrayResize(g_aNodeMiss, 0);
+   ArrayResize(g_aLeaf, 0);
+   ushort sp = StringGetCharacter(" ", 0);
+   int nodeTotal = 0;
+   int leafTotal = 0;
+   bool ok = true;
+   for(int t = 0; t < nTrees && ok; t++)
+     {
+      string p[];
+      if(StringSplit(FileReadString(h), sp, p) != 4 || p[0] != "TREE")
+        {
+         ok = false;
+         break;
+        }
+      int nn = (int)StringToInteger(p[1]);
+      int nl = (int)StringToInteger(p[2]);
+      g_aTreeRoot[t]  = (int)StringToInteger(p[3]);
+      g_aNodeStart[t] = nodeTotal;
+      g_aLeafStart[t] = leafTotal;
+      ArrayResize(g_aNodeFeat, nodeTotal + nn);
+      ArrayResize(g_aNodeThr, nodeTotal + nn);
+      ArrayResize(g_aNodeLeft, nodeTotal + nn);
+      ArrayResize(g_aNodeRight, nodeTotal + nn);
+      ArrayResize(g_aNodeDefLeft, nodeTotal + nn);
+      ArrayResize(g_aNodeMiss, nodeTotal + nn);
+      for(int k = 0; k < nn; k++)
+        {
+         string q[];
+         if(StringSplit(FileReadString(h), sp, q) != 7 || q[0] != "N")
+           {
+            ok = false;
+            break;
+           }
+         int n = nodeTotal + k;
+         g_aNodeFeat[n]    = (int)StringToInteger(q[1]);
+         g_aNodeThr[n]     = StringToDouble(q[2]);
+         g_aNodeLeft[n]    = (int)StringToInteger(q[3]);
+         g_aNodeRight[n]   = (int)StringToInteger(q[4]);
+         g_aNodeDefLeft[n] = (int)StringToInteger(q[5]);
+         g_aNodeMiss[n]    = (int)StringToInteger(q[6]);
+         if(g_aNodeFeat[n] < 0 || g_aNodeFeat[n] >= ALPHA_NFEAT)
+            ok = false;
+        }
+      ArrayResize(g_aLeaf, leafTotal + nl);
+      for(int k = 0; k < nl && ok; k++)
+        {
+         string q[];
+         if(StringSplit(FileReadString(h), sp, q) != 2 || q[0] != "L")
+           {
+            ok = false;
+            break;
+           }
+         g_aLeaf[leafTotal + k] = StringToDouble(q[1]);
+        }
+      nodeTotal += nn;
+      leafTotal += nl;
+     }
+   FileClose(h);
+   if(!ok)
+     {
+      g_aStatus = "file model rusak";
+      Print("[SAPU JAGAD] Alpha: file model rusak/terpotong.");
+      return false;
+     }
+   g_aLoaded = true;
+   g_aStatus = g_aValidated ? "model LOLOS validasi" : "model TIDAK LOLOS validasi";
+   PrintFormat("[SAPU JAGAD] Alpha: %d pohon, horizon %d mnt, ambang %.4f, %s | %s",
+               nTrees, g_aHorizon, g_aCut, g_aStatus, g_aSummary);
+   return true;
+  }
+
+// peluang harga naik dalam horizon model (0..1)
+double AlphaPredict(const double &f[])
+  {
+   int nTrees = ArraySize(g_aTreeRoot);
+   double raw = 0.0;
+   for(int t = 0; t < nTrees; t++)
+     {
+      int base = g_aNodeStart[t];
+      int k = g_aTreeRoot[t];
+      int guard = 0;
+      while(k >= 0 && guard < 4096)
+        {
+         int n = base + k;
+         double v = f[g_aNodeFeat[n]];
+         bool valid = MathIsValidNumber(v);
+         bool goLeft = false;
+         if(g_aNodeMiss[n] == 2 && !valid)
+            goLeft = (g_aNodeDefLeft[n] == 1);
+         else
+            if(g_aNodeMiss[n] == 1 && (!valid || v == 0.0))
+               goLeft = (g_aNodeDefLeft[n] == 1);
+            else
+              {
+               if(!valid)
+                  v = 0.0;
+               goLeft = (v <= g_aNodeThr[n]);
+              }
+         k = goLeft ? g_aNodeLeft[n] : g_aNodeRight[n];
+         guard++;
+        }
+      if(k < 0)
+         raw += g_aLeaf[g_aLeafStart[t] - k - 1];
+     }
+   return 1.0 / (1.0 + MathExp(-raw));
+  }
+
+// fitur candle M15 tertutup terakhir (urutan = ALPHA_FEATURES)
+bool AlphaFeatures(double &f[], datetime &decUtc, double &atrOut)
+  {
+   MqlRates r[];
+   int n = CopyRates(_Symbol, PERIOD_M15, 1, ALPHA_BARS, r);
+   if(n < 600)
+      return false;
+   double o[], hh[], ll[], c[], tv[], tr[], d1[], d4[];
+   ArrayResize(o, n);
+   ArrayResize(hh, n);
+   ArrayResize(ll, n);
+   ArrayResize(c, n);
+   ArrayResize(tv, n);
+   ArrayResize(tr, n);
+   ArrayResize(d1, n);
+   ArrayResize(d4, n);
+   for(int i = 0; i < n; i++)
+     {
+      o[i]  = r[i].open;
+      hh[i] = r[i].high;
+      ll[i] = r[i].low;
+      c[i]  = r[i].close;
+      tv[i] = (double)r[i].tick_volume;
+      if(i == 0)
+         tr[i] = hh[i] - ll[i];
+      else
+         tr[i] = MathMax(hh[i] - ll[i], MathMax(MathAbs(hh[i] - c[i - 1]), MathAbs(ll[i] - c[i - 1])));
+      d1[i] = (i >= 1) ? c[i] - c[i - 1] : 0.0;
+      d4[i] = (i >= 4) ? c[i] - c[i - 4] : 0.0;
+     }
+   int N = n - 1;
+   double atr96 = SmaEnd(tr, N, 96);
+   atrOut = atr96;
+   ArrayResize(f, ALPHA_NFEAT);
+   ArrayInitialize(f, 0.0);
+   int idx = 0;
+   //--- anatomi / bobot 3 candle terakhir
+   for(int k = 0; k < 3; k++)
+     {
+      int j = N - k;
+      double rng  = hh[j] - ll[j];
+      double body = SafeDiv(c[j] - o[j], rng);
+      double vol  = SafeDiv(tv[j], SmaEnd(tv, j, 96));
+      f[idx++] = body;
+      f[idx++] = SafeDiv(hh[j] - MathMax(o[j], c[j]), rng);
+      f[idx++] = SafeDiv(MathMin(o[j], c[j]) - ll[j], rng);
+      f[idx++] = SafeDiv((c[j] - ll[j]) - (hh[j] - c[j]), rng);
+      f[idx++] = SafeDiv(rng, SmaEnd(tr, j, 96));
+      f[idx++] = vol;
+      f[idx++] = body * vol;
+     }
+   //--- momentum multi-horizon
+   int lags[8] = {1, 2, 4, 8, 16, 32, 96, 480};
+   for(int k = 0; k < 8; k++)
+      f[idx++] = SafeDiv(c[N] - c[N - lags[k]], atr96);
+   //--- volatilitas & rezim
+   f[idx++] = SafeDiv(SmaEnd(tr, N, 14), atr96);
+   int ers[2] = {16, 96};
+   for(int k = 0; k < 2; k++)
+     {
+      double path = 0.0;
+      for(int i = N - ers[k] + 1; i <= N; i++)
+         path += MathAbs(c[i] - c[i - 1]);
+      f[idx++] = SafeDiv(MathAbs(c[N] - c[N - ers[k]]), path);
+     }
+   f[idx++] = SafeDiv(SampleVarEnd(d4, N, 96), 4.0 * SampleVarEnd(d1, N, 96));
+   //--- jarak ke EMA (dalam ATR)
+   int spans[3] = {20, 50, 200};
+   for(int k = 0; k < 3; k++)
+     {
+      double a = 2.0 / (spans[k] + 1.0);
+      double ema = c[0];
+      for(int i = 1; i <= N; i++)
+         ema = a * c[i] + (1.0 - a) * ema;
+      f[idx++] = SafeDiv(c[N] - ema, atr96);
+     }
+   //--- posisi di channel Donchian
+   int dons[3] = {32, 96, 480};
+   for(int k = 0; k < 3; k++)
+     {
+      double hi = hh[N];
+      double lo = ll[N];
+      for(int i = N - dons[k] + 1; i <= N; i++)
+        {
+         hi = MathMax(hi, hh[i]);
+         lo = MathMin(lo, ll[i]);
+        }
+      f[idx++] = SafeDiv(c[N] - lo, hi - lo);
+     }
+   //--- waktu keputusan (akhir candle) dalam GMT & New York
+   decUtc = r[N].time + 900 - ServerGMTOffsetHours() * 3600;
+   double gm = (double)((long)decUtc % 86400) / 3600.0;
+   datetime nyT = decUtc + (UsDstActive(decUtc) ? -4 : -5) * 3600;
+   double nyh = (double)((long)nyT % 86400) / 3600.0;
+   MqlDateTime nyS;
+   TimeToStruct(nyT, nyS);
+   int dowPy = (nyS.day_of_week + 6) % 7;          // Senin = 0 seperti pandas
+   f[idx++] = MathSin(2.0 * M_PI * gm / 24.0);
+   f[idx++] = MathCos(2.0 * M_PI * gm / 24.0);
+   f[idx++] = MathSin(2.0 * M_PI * nyh / 24.0);
+   f[idx++] = MathCos(2.0 * M_PI * nyh / 24.0);
+   f[idx++] = (double)dowPy;
+   int since = (int)(((long)nyT % 86400) / 60) - 510;
+   f[idx++] = (since >= 0 && since <= 180 && dowPy < 5) ? (double)since : -1.0;
+   for(int i = 0; i < ALPHA_NFEAT; i++)
+      if(!MathIsValidNumber(f[i]))
+         f[i] = 0.0;
+   return (idx == ALPHA_NFEAT);
+  }
+
+void AlphaDump(const double &f[], const datetime decUtc)
+  {
+   int h = FileOpen("sapu_jagad_alpha_fitur_ea.csv", FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ);
+   if(h == INVALID_HANDLE)
+      return;
+   if(FileSize(h) == 0)
+      FileWriteString(h, "dec_time," + ALPHA_FEATURES + "\n");
+   FileSeek(h, 0, SEEK_END);
+   string line = TimeToString(decUtc, TIME_DATE | TIME_SECONDS);
+   for(int i = 0; i < ArraySize(f); i++)
+      line += "," + DoubleToString(f[i], 10);
+   FileWriteString(h, line + "\n");
+   FileClose(h);
+  }
+
+bool AlphaFindPosition(ulong &ticket, int &dir, datetime &opened, double &profit)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol || (ulong)PositionGetInteger(POSITION_MAGIC) != AlphaMagic())
+         continue;
+      ticket = t;
+      dir    = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
+      opened = (datetime)PositionGetInteger(POSITION_TIME);
+      profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP) -
+               PositionGetDouble(POSITION_VOLUME) * InpCommissionPerLot;
+      return true;
+     }
+   return false;
+  }
+
+double AlphaFloating()
+  {
+   ulong ticket = 0;
+   int dir = 0;
+   datetime opened = 0;
+   double profit = 0.0;
+   if(AlphaFindPosition(ticket, dir, opened, profit))
+      return profit;
+   return 0.0;
+  }
+
+void AlphaClose(const ulong ticket, const string reason)
+  {
+   trade.SetExpertMagicNumber(AlphaMagic());
+   for(int attempt = 0; attempt < 3; attempt++)
+     {
+      if(trade.PositionClose(ticket, g_slippagePts) && IsOk(trade.ResultRetcode()))
+        {
+         PrintFormat("[SAPU JAGAD] Alpha tutup: %s", reason);
+         g_lastCloseInfo = StringFormat("ALPHA %s (%s)", reason, TimeToString(TimeCurrent(), TIME_MINUTES));
+         return;
+        }
+      if(trade.ResultRetcode() == TRADE_RETCODE_INVALID_FILL)
+         NextFilling();
+      else
+         Sleep(50);
+     }
+   Warn(StringFormat("Alpha gagal menutup posisi #%s: %u", (string)ticket, trade.ResultRetcode()));
+  }
+
+void AlphaCloseIfAny(const string reason)
+  {
+   ulong ticket = 0;
+   int dir = 0;
+   datetime opened = 0;
+   double profit = 0.0;
+   if(AlphaFindPosition(ticket, dir, opened, profit))
+      AlphaClose(ticket, reason);
+  }
+
+void ManageAlpha(const SEnv &e)
+  {
+   if(!InpAlphaEnable)
+     {
+      g_aStatus = "nonaktif";
+      return;
+     }
+   ulong ticket = 0;
+   int dir = 0;
+   datetime opened = 0;
+   double profit = 0.0;
+   bool hasPos = AlphaFindPosition(ticket, dir, opened, profit);
+   if(hasPos)
+     {
+      if(e.halted || e.fridayClose)
+        {
+         AlphaClose(ticket, "proteksi global");
+         return;
+        }
+      if(TimeCurrent() >= opened + g_aHorizon * 60)
+        {
+         AlphaClose(ticket, StringFormat("horizon %d mnt selesai %+.2f", g_aHorizon, profit));
+         return;
+        }
+     }
+   if(!g_aLoaded)
+      return;
+
+   datetime bar = iTime(_Symbol, PERIOD_M15, 0);
+   if(bar == 0 || bar == g_aLastBar)
+      return;
+   g_aLastBar = bar;
+
+   double f[];
+   datetime decUtc = 0;
+   double atr = 0.0;
+   if(!AlphaFeatures(f, decUtc, atr))
+     {
+      g_aStatus = "riwayat M15 belum cukup";
+      return;
+     }
+   if(InpAlphaDumpFeatures)
+      AlphaDump(f, decUtc);
+   g_aLastProb = AlphaPredict(f);
+   double score = g_aLastProb - 0.5;
+
+   if(!g_aValidated && !InpAlphaAllowUnvalidated)
+     {
+      g_aStatus = "model TIDAK LOLOS validasi: hanya memantau";
+      return;
+     }
+   if(hasPos)
+     {
+      g_aStatus = StringFormat("posisi %s berjalan", DirName(dir));
+      return;
+     }
+   if(MathAbs(score) < g_aCut)
+     {
+      g_aStatus = "menunggu sinyal kuat";
+      return;
+     }
+   if(e.halted || e.fridayClose || e.marginLow || e.spreadBad)
+     {
+      g_aStatus = "sinyal ada, entry diblok proteksi";
+      return;
+     }
+
+   int d = (score > 0.0) ? 1 : -1;
+   double lot = NormalizeLot(e.lot * InpAlphaLotMult);
+   double price = (d > 0) ? e.ask : e.bid;
+   double sl = 0.0;
+   if(InpAlphaSLATR > 0.0 && atr > 0.0)
+     {
+      double dist = MathMax(InpAlphaSLATR * atr, MinStopDistance() + g_tickSize);
+      sl = NormPrice(price - d * dist);
+     }
+   trade.SetExpertMagicNumber(AlphaMagic());
+   bool ok = false;
+   for(int attempt = 0; attempt < 3 && !ok; attempt++)
+     {
+      bool sent = (d > 0) ? trade.Buy(lot, _Symbol, 0.0, sl, 0.0, InpComment + " ALPHA")
+                          : trade.Sell(lot, _Symbol, 0.0, sl, 0.0, InpComment + " ALPHA");
+      ok = sent && IsOk(trade.ResultRetcode());
+      if(!ok)
+        {
+         if(trade.ResultRetcode() == TRADE_RETCODE_INVALID_FILL)
+            NextFilling();
+         else
+            break;
+        }
+     }
+   if(ok)
+     {
+      g_aStatus = StringFormat("masuk %s p=%.3f", DirName(d), g_aLastProb);
+      PrintFormat("[SAPU JAGAD] Alpha %s %.2f lot, p=%.3f (skor %+.3f >= %.3f), SL %s, keluar %d mnt",
+                  DirName(d), lot, g_aLastProb, score, g_aCut, DoubleToString(sl, _Digits), g_aHorizon);
+     }
+   else
+      Warn(StringFormat("Alpha gagal masuk %s: %u %s", DirName(d), trade.ResultRetcode(), trade.ResultRetcodeDescription()));
+  }
+
+//+------------------------------------------------------------------+
 //| Panel informasi                                                  |
 //+------------------------------------------------------------------+
 void PanelLine(const int idx, const string text, const color clr)
@@ -1817,7 +2371,7 @@ void UpdatePanel(const SEnv &e, const SBasket &b[])
 
    PanelBackground(PANEL_LINES);   // latar dibuat dulu agar label tergambar di atasnya
    int i = 0;
-   PanelLine(i++, "EA SAPU JAGAD v1.20   " + _Symbol + (e.tradeAllowed ? "" : "   [AutoTrading OFF]"),
+   PanelLine(i++, "EA SAPU JAGAD v1.30   " + _Symbol + (e.tradeAllowed ? "" : "   [AutoTrading OFF]"),
              e.tradeAllowed ? clrGold : clrTomato);
    PanelLine(i++, StringFormat("Mesin %s | Rezim %s (ER %.2f %s) | z %+.2f | Tren H1 %s", engine,
                                RegimeName(e.regime), e.er, erDir, e.z, trend), clrSilver);
@@ -1843,6 +2397,10 @@ void UpdatePanel(const SEnv &e, const SBasket &b[])
                                g_realizedToday, cur, floating, ddPct, InpMaxDrawdownPct,
                                AccountInfoDouble(ACCOUNT_MARGIN_LEVEL)),
              (g_realizedToday + floating) >= 0.0 ? clrLimeGreen : clrTomato);
+   PanelLine(i++, StringFormat("Alpha: %s | p naik %.3f | skor %+.3f / ambang %.3f | H %d mnt%s", g_aStatus,
+                               g_aLastProb, g_aLastProb - 0.5, g_aCut, g_aHorizon,
+                               (g_aLoaded && !g_aValidated) ? " | TIDAK LOLOS" : ""),
+             (g_aLoaded && g_aValidated) ? clrAqua : clrDarkGray);
    PanelLine(i++, "Tutup terakhir: " + g_lastCloseInfo, clrDarkGray);
    ChartRedraw(0);
   }
@@ -1915,6 +2473,9 @@ int OnInit()
 
    if(InpUseNewsFilter && UseCsv())
       LoadNewsCsv();
+   if(InpAlphaEnable)
+      AlphaLoadModel();
+   g_aLastBar = iTime(_Symbol, PERIOD_M15, 0);   // jangan entry dari candle yang sudah lama tutup
 
    if(AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
       Print("[SAPU JAGAD] Peringatan: akun bukan HEDGING. Posisi akan digabung (netting); gunakan satu arah saja.");
@@ -2007,6 +2568,7 @@ void OnTick()
          NewsRide(env, b);
         }
      }
+   ManageAlpha(env);
 
    env.halted = (TimeCurrent() < g_haltUntil);
    UpdatePanel(env, b);
