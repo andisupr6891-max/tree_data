@@ -2,6 +2,8 @@
 
 EA ini dibangun dari pengamatan dua video. Logika di keduanya ditiru, lalu digabung oleh **detektor rezim pasar**. Ada juga lapisan kecerdasan untuk sesi, rilis berita, dan volatilitas.
 
+> **STATUS: GAGAL uji data emas asli (Mei 2011 – Juni 2018, ±7,1 tahun).** Dengan pengaturan default, EA ini menghabiskan akun $10.000 baik di periode 2011–2014 maupun 2015–2018. Tiruan kedua video juga jebol di salah satu periode. Jangan dipakai di akun uang nyata. Rincian dan cara mengujinya dengan data Anda sendiri ada di bagian 4 dan 5.
+
 | File | Fungsi |
 |---|---|
 | `Experts/EA_SAPU_JAGAD.mq5` | Kode EA (MQL5) |
@@ -49,6 +51,8 @@ di antaranya -> NETRAL : tidak membuka basket baru (pasar acak = tidak ada edge)
 ```
 
 > Jujur soal "edge": tidak ada susunan grid yang otomatis profit. Di data acak, semua grid kalah oleh biaya spread. Edge hanya ada kalau (1) detektor rezim benar-benar mengenali pasar emas Anda, (2) biaya terkendali, dan (3) ekor risiko dipotong. Ketiganya harus **dibuktikan di dataset asli** dengan alat forensik dan uji walk-forward (bagian 5).
+>
+> **Hasil uji data asli 2011–2018: gagal.** Di data itu, pengalih rezim ini **tidak** menunjukkan edge: mesin momentum tetap rugi walaupun hanya dibuka di rezim TREN (lihat bagian 4b). Gagasan penggabungannya masuk akal di atas kertas, tetapi belum terbukti di pasar.
 
 ---
 
@@ -85,25 +89,44 @@ di antaranya -> NETRAL : tidak membuka basket baru (pasar acak = tidak ada edge)
 
 ---
 
-## 4. Hasil uji forensik sementara (data SINTETIS)
+## 4. Hasil uji: data sintetis, lalu data emas asli 7,1 tahun
 
-Data asli belum tersedia di sesi pembuatan EA. Folder Download dan drive D ada di komputer Anda, bukan di container cloud. Jadi uji di bawah memakai **data sintetis** XAUUSD M1 selama 4 bulan. Fungsinya **memvalidasi mekanisme**, bukan membuktikan profit.
+### 4a. Uji awal di data sintetis (4 bulan) — dan biasnya
 
-**Data berezim** (blok 4 jam: tren / range memantul / acak):
+Uji pertama hanya memakai data **sintetis** buatan sendiri selama 4 bulan. Hasilnya tampak bagus (+$778, PF 1.89, DD 7,6%), tetapi ada tiga bias yang membuatnya **tidak bisa dipercaya**:
 
-| Konfigurasi | Net | Win% | Profit factor | Max DD | MAE terburuk |
-|---|---|---|---|---|---|
-| **SAPU JAGAD v1.20** | **+778** | 89% | **1.89** | **7.6%** | −796 |
-| Tiruan video 1 | −1.468 | 99% | 0.51 | 45.7% | −5.263 |
-| Tiruan video 2 | −2.023 | 99% | 0.23 | 56.8% | −6.021 |
+1. Default (jumlah level reversion, jarak ATR, konfirmasi H1) dipilih setelah melihat hasil di data sintetis yang sama. Itu pemilihan in-sample.
+2. Data berezim itu dirancang sendiri, dengan rezim yang memang mudah dikenali oleh detektor ER.
+3. Mode tanpa kalender sempat memakai lonjakan harga yang dideteksi dari data itu sendiri untuk perisai berita. Itu sama dengan mengintip masa depan. **Sudah diperbaiki**: lonjakan hasil deteksi kini hanya dipakai sebagai label laporan.
 
-- Win rate 99% pada kedua tiruan video adalah ciri khas grid: banyak untung kecil, lalu satu basket menghapus semuanya.
-- Edge SAPU JAGAD di data ini datang dari **MOMENTUM di rezim TREN** (+1.121). Mesin **REVERSION** masih sedikit negatif (−345), jadi harus dikalibrasi di data asli.
-- **Walk-forward** (cari parameter di 70% data awal, uji di 30% akhir): default tetap positif di out-of-sample (+215). Satu kandidat yang terbaik di in-sample justru rugi −724 di out-of-sample. Contoh overfitting seperti ini yang harus disaring.
+### 4b. Uji data emas asli 2011–2018 (tanpa mengintip data depan)
 
-**Data acak + berita** (tanpa pola): SAPU JAGAD hampir impas (−125, DD 10.9%). Tiruan video 1 kehilangan −9.038 dengan DD 168% (akun jebol). Di data tanpa pola tidak ada sistem yang bisa untung; yang bisa dilakukan hanya **bertahan**.
+**Sumber data:** tick XAUUSD Dukascopy dari repositori publik FX-Data, sekitar 230 juta tick, diringkas menjadi bar M1 dengan spread asli rata-rata per menit. Semua waktu dalam GMT.
 
----
+**Cacat data yang ditangani:** jam 00:00–01:00 GMT hilang setiap hari. Celah ini dikenali, dan order yang terlewati diisi di harga ordernya. Perlakuan ini berlaku sama untuk semua konfigurasi.
+
+**Protokol anti-bias:**
+- Indikator hanya memakai bar yang sudah tutup.
+- Tidak ada lonjakan hasil deteksi yang dipakai untuk keputusan trading.
+- Data dibagi menjadi **desain 2011–2014** (boleh dibedah) dan **holdout 2015–2018** (disentuh sekali, untuk evaluasi akhir).
+- Tiap periode dimulai dengan saldo $10.000, lot 0.01.
+
+| Konfigurasi | 2011–2014 (desain) | 2015–2018 (holdout) |
+|---|---|---|
+| **SAPU JAGAD v1.20 default** | **−$10.418, DD 104% (akun habis)** | **−$10.009, DD 100% (akun habis)** |
+| Tiruan video 1 (momentum, tanpa SL) | −$19.593, DD 163% (jebol di 2014) | +$6.187, DD 82% (floating terburuk −$9.843) |
+| Tiruan video 2 (limit, tanpa SL) | −$6.907, DD 90% (jebol di 2014) | +$4.223, DD 38% (floating terburuk −$6.617) |
+
+**Temuan forensik (data asli):**
+- Basket di kondisi **normal hampir impas**: 2015–2018 ada 2.724 basket dengan net −$514.
+- Hampir seluruh kerugian datang dari basket yang **tersentuh lonjakan harga**: 276 basket, −$9.495.
+- Mesin MOMENTUM adalah penyumbang rugi terbesar (2015–2018: −$8.822; 65 kali cut loss senilai −$13.128).
+- Mesin REVERSION juga negatif: banyak TP kecil, dikalahkan cut loss.
+- **Bukan masalah biaya**: dengan spread hampir nol pun, default tetap menghabiskan akun di 2011–2014 (PF 0,62).
+- Percobaan perbaikan di data desain tidak menolong, sehingga **tidak dimasukkan ke EA**. Yang dicoba: perisai jam rilis AS tanpa kalender, keluar darurat saat lonjakan, cut loss basket 2%, reversion dimatikan, dan jarak berbasis ATR.
+- Dilema grid terlihat jelas. Tanpa cut loss, grid untung bertahun-tahun lalu jebol (tiruan video). Dengan cut loss, grid berdarah pelan-pelan (SAPU JAGAD).
+
+**Batas berlakunya kesimpulan:** data 2011–2018 berasal dari era harga emas $1.050–1.900 dengan spread Dukascopy sekitar $0.36. Kondisi emas 2023–2026 berbeda: harga lebih tinggi, pergerakan per menit lebih besar, dan spread relatif lebih kecil. Kesimpulan "tidak ada edge" kuat untuk 2011–2018, tetapi untuk kondisi terkini **harus diuji dengan data terbaru Anda** memakai protokol yang sama (bagian 5).
 
 ## 5. Uji forensik dengan dataset Anda (drive D)
 
@@ -121,7 +144,10 @@ python sapu_jagad_forensik.py --data "D:\dataset" --news "D:\news.csv" --gmt-off
 :: 3) uji anti-overfitting: cari parameter di 70% data awal, uji di 30% sisanya
 python sapu_jagad_forensik.py --data "D:\dataset" --news "D:\news.csv" --gmt-offset 2 --walk-forward 0.7
 
-:: 4) uji konfigurasi tertentu dari file .set EA
+:: 4) uji ketahanan: biaya 2x, slippage, variasi parameter +/-30%, per tahun, Monte Carlo
+python sapu_jagad_forensik.py --data "D:\dataset" --gmt-offset 2 --ketahanan
+
+:: 5) uji konfigurasi tertentu dari file .set EA
 python sapu_jagad_forensik.py --data "D:\dataset" --set ..\Presets\EA_SAPU_JAGAD_XAUUSD.set --from 2025-01-01
 ```
 
@@ -130,6 +156,12 @@ Opsi penting:
 - `--gmt-offset`: selisih jam waktu data/server broker terhadap GMT. Exness = 0; banyak broker = 2 (musim panas 3).
 - `--point`: 0.01 untuk harga 2 digit, 0.001 untuk 3 digit. Hanya dipakai untuk kolom spread data bar.
 - `--symbol-filter ""`: pindai semua file, bukan hanya yang namanya mengandung XAU/GOLD.
+- Celah data di tengah sesi (lebih dari 10 menit, bukan jeda harian/akhir pekan) dikenali otomatis dan tidak dihitung sebagai lonjakan pasar.
+
+**Aturan anti mengintip data:**
+- Tanpa `--news`, perisai berita tidak aktif di replay.
+- Pakai `--walk-forward` atau pisahkan sendiri data desain dan holdout.
+- Jangan mengubah parameter setelah melihat hasil holdout.
 
 Format data yang dikenali otomatis: ekspor tick/bar MT5, CSV umum (waktu + bid/ask atau OHLC), Dukascopy, dan HistData.
 
@@ -183,4 +215,5 @@ Semua jarak ditulis dalam **satuan harga** (0.50 = 50 sen), sehingga aman untuk 
 
 - **EA belum dikompilasi di lingkungan pembuatannya** karena MetaEditor tidak tersedia di container cloud. Kode sudah diperiksa statis (kurung, fungsi, jumlah argumen). Bila MetaEditor menampilkan error atau warning saat Compile, kirimkan pesannya untuk diperbaiki.
 - Alat forensik meniru logika EA, tetapi **bukan pengganti** Strategy Tester. Slippage, swap, margin, dan eksekusi broker nyata bisa berbeda.
-- Trading emas dengan grid berisiko tinggi. Hasil masa lalu, apalagi data sintetis, **tidak menjamin** hasil masa depan. Gunakan modal yang siap hilang.
+- **Uji data asli 2011–2018 gagal** (bagian 4b). EA ini belum layak untuk uang nyata. Ujilah dulu di data terbaru Anda, lalu di akun demo.
+- Trading emas dengan grid berisiko tinggi. Hasil masa lalu **tidak menjamin** hasil masa depan. Gunakan modal yang siap hilang.

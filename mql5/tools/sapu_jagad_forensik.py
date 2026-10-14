@@ -16,6 +16,7 @@ Contoh pemakaian (Windows):
     python sapu_jagad_forensik.py --data "D:\\dataset\\XAUUSD_M1.csv" --news "D:\\news.csv" --sweep
     python sapu_jagad_forensik.py --data "D:\\dataset" --set EA_SAPU_JAGAD_XAUUSD.set --from 2025-01-01
     python sapu_jagad_forensik.py --data "D:\\dataset" --news "D:\\news.csv" --walk-forward 0.7
+    python sapu_jagad_forensik.py --data "D:\\dataset" --ketahanan
 
 Format data yang dikenali otomatis:
   * Ekspor tick MT5  : <DATE> <TIME> <BID> <ASK> <LAST> <VOLUME> <FLAGS>
@@ -59,6 +60,11 @@ class Config:
     trail_step: float = 0.50
     trail_cooldown_ms: int = 1000
     max_positions: int = 24
+    use_atr: bool = False              # jarak momentum dari ATR M5(14) (timeframe EA harus M5)
+    atr_step_factor: float = 0.25
+    atr_start_factor: float = 1.00
+    atr_min_step: float = 0.30
+    atr_max_step: float = 2.00
     fixed_lot: float = 0.01
     tp_mode: int = 1                   # 0 USD tetap, 1 per 0.01 lot, 2 % saldo
     tp_value: float = 1.00
@@ -105,6 +111,12 @@ class Config:
     burst_max_fills: int = 5
     burst_seconds: int = 30
     burst_pause_sec: int = 300
+    # --- EKSPERIMEN (belum ada di EA; diuji di data 2011-2014 dan TIDAK memperbaiki hasil) ---
+    us_time_shield: bool = False       # perisai jam rilis tetap AS (tanpa kalender, waktu New York + DST)
+    us_shield_times_et: str = "0830,1000,1400"
+    us_shield_before_min: int = 10
+    us_shield_after_min: int = 20
+    shock_exit_ratio: float = 0.0      # range candle >= X ATR melawan basket yang rugi: keluar darurat (0 = mati)
     use_news_filter: bool = True
     news_before_min: int = 15
     news_after_min: int = 30
@@ -144,7 +156,8 @@ class Config:
 SET_MAP = {
     "InpDirection": "direction", "InpOneBasketOnly": "one_basket_only",
     "InpGridLevels": "grid_levels", "InpGridStep": "grid_step", "InpStartDistance": "start_distance",
-    "InpTrailStep": "trail_step", "InpTrailCooldownMs": "trail_cooldown_ms", "InpMaxPositions": "max_positions",
+    "InpTrailStep": "trail_step", "InpUseATR": "use_atr", "InpATRStepFactor": "atr_step_factor",
+    "InpATRStartFactor": "atr_start_factor", "InpATRMinStep": "atr_min_step", "InpATRMaxStep": "atr_max_step", "InpTrailCooldownMs": "trail_cooldown_ms", "InpMaxPositions": "max_positions",
     "InpFixedLot": "fixed_lot", "InpTPMode": "tp_mode", "InpTPValue": "tp_value",
     "InpCommissionPerLot": "commission_per_lot", "InpUseProfitLock": "use_profit_lock",
     "InpLockGivebackPct": "lock_giveback_pct", "InpRecoveryAfter": "recovery_after",
@@ -172,6 +185,7 @@ SET_MAP = {
     "InpNewsLotMult": "news_lot_mult", "InpNewsTPPerMinLot": "news_tp_per_minlot",
     "InpNewsSLPerMinLot": "news_sl_per_minlot", "InpNewsMaxHoldMin": "news_max_hold_min",
     "InpNewsMaxSpread": "news_max_spread", "InpTrendEMA": "trend_ema",
+
     "InpEngineMode": "engine_mode", "InpRegimeBars": "regime_bars", "InpERTrend": "er_trend",
     "InpERRange": "er_range", "InpRevLevels": "rev_levels", "InpRevStep": "rev_step", "InpRevStart": "rev_start",
     "InpRevZEntry": "rev_z_entry", "InpRevEMAPeriod": "rev_ema_period", "InpRevWithTrendOnly": "rev_with_trend_only",
@@ -188,6 +202,7 @@ PRESETS = {
     # tiruan sedekat mungkin dengan perilaku Steev GTS V4.4 di video
     "video": dict(engine_mode="momentum", direction="buy", use_profit_lock=False, recovery_after=0, max_drawdown_pct=0.0,
                   basket_sl_pct=0.0, basket_age_hours=0.0, no_add_against_trend=False,
+                  us_time_shield=False, shock_exit_ratio=0.0,
                   max_positions=40, max_spread=0.0, friday_stop=False, open_guard_min=0, rollover_guard=False,
                   vol_guard=False, burst_max_fills=0, use_news_filter=False),
     # tiruan grid BUY/SELL LIMIT rapat di video kedua (zs.x_hanss)
@@ -196,7 +211,7 @@ PRESETS = {
                    rev_with_trend_only=False, rev_regime_exit=False, rev_sl_per_minlot=0.0, rev_max_hold_min=0,
                    basket_sl_pct=0.0, max_drawdown_pct=0.0, max_spread=0.0, friday_stop=False, open_guard_min=0,
                    rollover_guard=False, vol_guard=False, burst_max_fills=0, use_news_filter=False,
-                   one_basket_only=True),
+                   one_basket_only=True, us_time_shield=False, shock_exit_ratio=0.0),
     "sapujagad": {},
 }
 
@@ -576,7 +591,11 @@ def infer_news(source, gmt_offset_h, k=5.0):
     events = []
     trs = deque(maxlen=60)
     prev_close = None
+    prev_t = None
     for b in bars:
+        if prev_t is not None and b[0] - prev_t > 600:
+            prev_close = None   # lompatan setelah celah data/jeda pasar bukan kejutan berita
+        prev_t = b[0]
         tr = b[2] - b[3] if prev_close is None else max(b[2], prev_close) - min(b[3], prev_close)
         if len(trs) == 60:
             atr = sum(trs) / 60.0
@@ -605,6 +624,32 @@ REGIME_NAMES = ("RANGE", "NETRAL", "TREN")
 SLOT_COUNT = 6
 
 
+def us_dst_active(gmt_t):
+    """Jam musim panas AS: Minggu ke-2 Maret 07:00 GMT s/d Minggu pertama November 06:00 GMT."""
+    y = _time.gmtime(gmt_t).tm_year
+
+    def nth_sunday(month, n):
+        first = calendar.timegm((y, month, 1, 0, 0, 0))
+        wd = _time.gmtime(first).tm_wday            # Senin = 0
+        return first + ((6 - wd) % 7 + 7 * (n - 1)) * 86400
+    return nth_sunday(3, 2) + 7 * 3600 <= gmt_t < nth_sunday(11, 1) + 6 * 3600
+
+
+def us_shield_phase(gmt_t, times_min, before, after):
+    """0 = aman, 1 = menjelang jam rilis tetap AS, 2 = sesudahnya. Hanya hari kerja."""
+    wd = int((gmt_t // 86400 + 3) % 7)
+    if wd >= 5:
+        return 0
+    et = gmt_t + (-4 if us_dst_active(gmt_t) else -5) * 3600
+    m = et % 86400 / 60.0
+    for tm in times_min:
+        if tm - before <= m < tm:
+            return 1
+        if tm <= m < tm + after:
+            return 2
+    return 0
+
+
 class Basket:
     __slots__ = ("slot", "dir", "kind", "ext", "pos", "pend", "pend_lot", "peak", "cooldown_until",
                  "pause_until", "last_trail", "rec")
@@ -626,8 +671,12 @@ class Basket:
 
 
 class Engine:
-    def __init__(self, cfg, news, gmt_offset_h, contract=100.0, balance=10000.0, tick_size=0.01):
+    def __init__(self, cfg, news, gmt_offset_h, contract=100.0, balance=10000.0, tick_size=0.01,
+                 extra_spread=0.0, slip=0.0):
         self.cfg = cfg
+        self.extra_spread = extra_spread   # uji stres: spread tambahan (satuan harga)
+        self.hole_fill = False             # tick pertama setelah celah DATA (bukan gap pasar)
+        self.slip = slip                   # uji stres: slippage merugikan per eksekusi market/stop
         self.news = news
         self.news_ptr = 0
         self.off = gmt_offset_h * 3600
@@ -679,6 +728,9 @@ class Engine:
         self.equity_curve = []
         self.last_curve_t = 0.0
         self.counters = defaultdict(int)
+        self.us_times = [int(x[:2]) * 60 + int(x[2:]) for x in cfg.us_shield_times_et.split(",") if len(x.strip()) == 4]
+        self.us_cache_min = None
+        self.us_cache_phase = 0
 
     # ---------------- indikator ----------------
     def _bars(self, t, bid):
@@ -787,6 +839,8 @@ class Engine:
     def _close(self, bk, t, bid, ask, reason, is_loss=False):
         cfg = self.cfg
         pnl = self._profit(bk, bid, ask) if bk.pos else 0.0
+        if bk.pos and self.slip > 0:
+            pnl -= self._volume(bk) * self.contract * self.slip
         if bk.pos:
             self.balance += pnl
             self.realized_day += pnl
@@ -827,7 +881,10 @@ class Engine:
                 keep.append(p)
                 continue
             # stop menjadi market order (bisa slip); limit terisi di harganya
-            px = (ask if bk.dir > 0 else bid) if is_stop else p
+            if self.hole_fill:
+                px = p     # celah data: harga nyata bergerak kontinu melewati level order
+            else:
+                px = (ask + self.slip if bk.dir > 0 else bid - self.slip) if is_stop else p
             if not bk.pos:
                 bk.rec = {"slot": SLOT_NAMES[bk.slot], "engine": SLOT_ENGINE[bk.slot], "open_t": t,
                           "session": SESSION_NAMES[session], "vol_ratio": round(env_vol, 2),
@@ -899,6 +956,8 @@ class Engine:
     # ---------------- satu tick ----------------
     def on_tick(self, t, bid, ask):
         cfg = self.cfg
+        if self.extra_spread:
+            ask = max(ask + self.extra_spread, bid + self.tick)
         self._bars(t, bid)
         spread = ask - bid
         mid = (bid + ask) * 0.5
@@ -921,6 +980,14 @@ class Engine:
         vol = self._vol_ratio() if cfg.vol_guard else 1.0
         regime = self._regime()
         news_phase, news_name = self._news(t, bid, ask)
+        if cfg.us_time_shield and news_phase == NEWS_NONE:
+            mkey = int(gmt // 60)
+            if mkey != self.us_cache_min:
+                self.us_cache_min = mkey
+                self.us_cache_phase = us_shield_phase(mkey * 60, self.us_times, cfg.us_shield_before_min,
+                                                      cfg.us_shield_after_min)
+            if self.us_cache_phase:
+                news_phase = NEWS_PRE if self.us_cache_phase == 1 else NEWS_POST
 
         # 1. pending terisi oleh pergerakan harga
         for bk in self.b:
@@ -973,6 +1040,15 @@ class Engine:
 
         # 3. exit per basket
         closed = False
+        if cfg.shock_exit_ratio > 0 and vol >= cfg.shock_exit_ratio and self.m1 is not None:
+            bar_move = bid - self.m1[1]
+            for bk in self.b:
+                if bk.pos and bk.dir * bar_move < 0 and self._profit(bk, bid, ask) < 0:
+                    self._close(bk, t, bid, ask, "keluar darurat kejutan", is_loss=True)
+                    self.counters["shock_exit"] += 1
+                    closed = True
+            if closed:
+                return
         sl_pct_money = self.balance * cfg.basket_sl_pct / 100.0 if cfg.basket_sl_pct > 0 else 0.0
         for bk in self.b:
             if not bk.pos:
@@ -1071,8 +1147,12 @@ class Engine:
         # 4b. tangga MOMENTUM (stop order, video 1)
         momentum_on = cfg.engine_mode != "reversion"
         adaptive = cfg.engine_mode == "adaptive"
-        step = max(cfg.grid_step * mult, self.tick)
-        start = max(cfg.start_distance * mult, self.tick)
+        base_step, base_start = cfg.grid_step, cfg.start_distance
+        if cfg.use_atr and self.atr_m5 > 0:
+            base_step = min(max(self.atr_m5 * cfg.atr_step_factor, cfg.atr_min_step), cfg.atr_max_step)
+            base_start = max(self.atr_m5 * cfg.atr_start_factor, base_step)
+        step = max(base_step * mult, self.tick)
+        start = max(base_start * mult, self.tick)
         lot = cfg.fixed_lot
         for s in (0, 1):
             bk = self.b[s]
@@ -1186,12 +1266,34 @@ class Engine:
                 self._close(bk, t, bid, ask, "akhir data")
 
 
-def run_sim(cfg, ticks, news, gmt_offset_h, contract, balance, tick_size):
-    eng = Engine(cfg, news, gmt_offset_h, contract, balance, tick_size)
+def is_data_hole(t_prev, t_now, off):
+    """Celah > 10 menit di tengah sesi = data hilang (bukan jeda harian 21-23 GMT / akhir pekan)."""
+    gap = t_now - t_prev
+    if gap <= 600 or gap > 3 * 3600:
+        return False
+    g0 = t_prev - off
+    wd = int((g0 // 86400 + 3) % 7)
+    if wd >= 5 or (wd == 4 and g0 % 86400 >= 20 * 3600):
+        return False
+    m0 = int(g0 % 86400 // 60)
+    m1 = int((t_now - off) % 86400 // 60)
+    brk_a, brk_b = 20 * 60 + 50, 23 * 60 + 10
+    return not (brk_a <= m0 <= brk_b or brk_a <= m1 <= brk_b or (m0 < brk_a and m1 > brk_b))
+
+
+def run_sim(cfg, ticks, news, gmt_offset_h, contract, balance, tick_size, **stress):
+    eng = Engine(cfg, news, gmt_offset_h, contract, balance, tick_size, **stress)
     last = None
     n = 0
+    off = gmt_offset_h * 3600
     for t, bid, ask in ticks:
+        if last is not None and is_data_hole(last[0], t, off):
+            eng.hole_fill = True
+            eng.m1_prev_close = None      # jangan anggap lompatan celah sebagai lonjakan volatilitas
+            eng.m5_prev_close = None
+            eng.counters["data_hole"] += 1
         eng.on_tick(t, bid, ask)
+        eng.hole_fill = False
         last = (t, bid, ask)
         n += 1
     if last:
@@ -1227,6 +1329,7 @@ def summarize(eng):
         "halts": eng.counters["halt"],
         "bursts": eng.counters["burst"],
         "news_rides": len(eng.ride_log),
+        "data_holes": eng.counters["data_hole"],
     }
 
 
@@ -1329,7 +1432,113 @@ def findings(eng, cfg, s):
     return tips
 
 
-def write_report(out_dir, label, eng, cfg, s, news_info, compare_rows=None, sweep_rows=None, wf_rows=None):
+def period_stats(recs):
+    """Statistik per tahun (bila data >= 2 tahun) atau per bulan."""
+    if not recs:
+        return {}, "Periode"
+    span = max(r["close_t"] for r in recs) - min(r["open_t"] for r in recs)
+    fmt, name = ("%Y", "Tahun") if span >= 2 * 365 * 86400 else ("%Y-%m", "Bulan")
+    return group_stats(recs, lambda r: _time.strftime(fmt, _time.gmtime(r["close_t"]))), name
+
+
+def label_shocks(recs, shocks):
+    """Tandai basket yang hidup saat ada kejutan harga (label pasca-fakta, bukan input trading)."""
+    import bisect
+    ts = [t for t, _ in shocks]
+    for r in recs:
+        i = bisect.bisect_left(ts, r["open_t"] - 900)
+        r["shock"] = i < len(ts) and ts[i] <= r["close_t"]
+
+
+def monte_carlo(recs, n=2000, seed=1):
+    """Bootstrap urutan hasil basket: sebaran net & drawdown bila nasib urutan berbeda."""
+    import random
+    res = [r["result"] for r in recs]
+    if not res:
+        return None
+    rng = random.Random(seed)
+    nets, dds = [], []
+    for _ in range(n):
+        eq = peak = mdd = 0.0
+        for _k in range(len(res)):
+            eq += res[rng.randrange(len(res))]
+            if eq > peak:
+                peak = eq
+            if peak - eq > mdd:
+                mdd = peak - eq
+        nets.append(eq)
+        dds.append(mdd)
+    nets.sort()
+    dds.sort()
+
+    def pct(a, q):
+        return round(a[min(len(a) - 1, int(q * len(a)))], 2)
+    return {"p_rugi": round(sum(1 for x in nets if x <= 0) / n * 100, 1), "net_p5": pct(nets, 0.05),
+            "net_p50": pct(nets, 0.5), "dd_p50": pct(dds, 0.5), "dd_p95": pct(dds, 0.95)}
+
+
+ROBUST_PARAMS = ("grid_step", "start_distance", "tp_value", "er_trend", "er_range", "rev_z_entry",
+                 "rev_step", "basket_sl_pct", "lock_giveback_pct", "news_impulse_atr")
+
+
+def robust_jobs(cfg):
+    jobs = [("stres: spread +0.10", cfg, {"extra_spread": 0.10}),
+            ("stres: spread +0.20", cfg, {"extra_spread": 0.20}),
+            ("stres: slippage 0.05/eksekusi", cfg, {"slip": 0.05}),
+            ("stres: komisi 7 USD/lot", replace(cfg, commission_per_lot=7.0), {})]
+    for name in ROBUST_PARAMS:
+        v = getattr(cfg, name)
+        for f in (0.7, 1.3):
+            nv = max(1, int(round(v * f))) if isinstance(v, int) and not isinstance(v, bool) else round(v * f, 4)
+            if (name == "er_range" and nv >= cfg.er_trend) or (name == "er_trend" and nv <= cfg.er_range):
+                continue
+            jobs.append(("sensitivitas: %s x%.1f = %s" % (name, f, nv), replace(cfg, **{name: nv}), {}))
+    return jobs
+
+
+def _robust_one(job):
+    label, cfg, kw = job
+    gmt, contract, balance, tick = _G["args"]
+    return label, summarize(run_sim(cfg, _G["ticks"], _G["news"], gmt, contract, balance, tick, **kw))
+
+
+def run_robust(cfg, ticks, news, args, workers):
+    jobs = robust_jobs(cfg)
+    argt = (args.gmt_offset, args.contract, args.balance, args.tick_size)
+    print("Uji ketahanan: %d variasi dengan %d proses..." % (len(jobs), workers))
+    if workers > 1:
+        import multiprocessing as mp
+        with mp.Pool(workers, initializer=_sweep_init, initargs=(ticks, news, argt)) as pool:
+            out = pool.map(_robust_one, jobs)
+    else:
+        _sweep_init(ticks, news, argt)
+        out = [_robust_one(j) for j in jobs]
+    return out
+
+
+def robust_verdict(base, rows, periods, mc, balance):
+    checks = [("Net dasar positif", base["net"] > 0, "%.2f" % base["net"])]
+    stress = dict((lab, r) for lab, r in rows if lab.startswith("stres"))
+    s2 = stress.get("stres: spread +0.20")
+    checks.append(("Tetap untung saat spread +0.20 (sekitar 2x)", bool(s2 and s2["net"] > 0),
+                   "%.2f" % s2["net"] if s2 else "-"))
+    s3 = stress.get("stres: slippage 0.05/eksekusi")
+    checks.append(("Tetap untung dengan slippage 0.05", bool(s3 and s3["net"] > 0), "%.2f" % s3["net"] if s3 else "-"))
+    sens = [r for lab, r in rows if lab.startswith("sensitivitas")]
+    frac = sum(1 for r in sens if r["net"] > 0) / len(sens) if sens else 0.0
+    checks.append(("Minimal 70% variasi parameter (+/-30%) tetap untung", frac >= 0.7, "%.0f%%" % (frac * 100)))
+    pf = sum(1 for v in periods.values() if v["net"] > 0) / len(periods) if periods else 0.0
+    checks.append(("Minimal 60% periode untung", pf >= 0.6, "%.0f%% dari %d" % (pf * 100, len(periods))))
+    if mc:
+        checks.append(("Monte Carlo: peluang rugi < 10%", mc["p_rugi"] < 10, "%.1f%%" % mc["p_rugi"]))
+        checks.append(("Monte Carlo: DD 95% < 30% saldo", mc["dd_p95"] < balance * 0.3,
+                       "%.2f (%.1f%%)" % (mc["dd_p95"], mc["dd_p95"] / balance * 100)))
+    verdict = "KUAT" if all(ok for _, ok, _ in checks) else "BELUM TERBUKTI KUAT"
+    return verdict, checks
+
+
+def write_report(out_dir, label, eng, cfg, s, news_info, compare_rows=None, sweep_rows=None, wf_rows=None,
+                 shocks=None, robust=None):
     recs = eng.records
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "basket_%s.csv" % label), "w", newline="", encoding="utf-8") as fh:
@@ -1358,6 +1567,11 @@ def write_report(out_dir, label, eng, cfg, s, news_info, compare_rows=None, swee
         L.append("## Perbandingan: tiruan video 1 (momentum), video 2 (reversion), dan SAPU JAGAD")
         L.append(table(compare_rows, ["Konfigurasi", "Net", "Basket", "Win%", "PF", "Max DD", "DD%", "RF", "MAE terburuk"]))
     L.append("")
+    ps, pname = period_stats(recs)
+    L.append("## Kestabilan per %s" % pname.lower())
+    L.append(table([[k, v["n"], v["net"], v["avg"], v["win"], v["worst_mae"]] for k, v in sorted(ps.items())],
+                   [pname, "Basket", "Net", "Rata2", "Win%", "MAE terburuk"]))
+    L.append("")
     L.append("## Per sesi (saat stop pertama terisi)")
     gs = group_stats(recs, lambda r: r["session"])
     L.append(table([[k, v["n"], v["net"], v["avg"], v["win"], v["worst_mae"], v["avg_pos"]] for k, v in sorted(gs.items())],
@@ -1382,6 +1596,15 @@ def write_report(out_dir, label, eng, cfg, s, news_info, compare_rows=None, swee
     L.append(table([[k[0], k[1], v["n"], v["net"], v["avg"], v["win"], v["worst_mae"]] for k, v in sorted(ge.items())],
                    ["Mesin", "Rezim", "Basket", "Net", "Rata2", "Win%", "MAE terburuk"]))
     L.append("")
+    if shocks:
+        label_shocks(recs, shocks)
+        gk = group_stats(recs, lambda r: "tersentuh kejutan harga" if r.get("shock") else "tanpa kejutan")
+        L.append("## Kejutan harga (label pasca-fakta, bukan input trading)")
+        L.append("Kejutan = candle M1 di menit :00/:30 dengan range >= %s x ATR. Bila kelompok 'tersentuh' jauh "
+                 "lebih buruk, siapkan file kalender berita (--news) agar perisai berita bisa diuji." % "k")
+        L.append(table([[k, v["n"], v["net"], v["avg"], v["win"], v["worst_mae"]] for k, v in sorted(gk.items())],
+                       ["Kelompok", "Basket", "Net", "Rata2", "Win%", "MAE terburuk"]))
+        L.append("")
     L.append("## Per arah / slot")
     gsl = group_stats(recs, lambda r: r["slot"])
     L.append(table([[k, v["n"], v["net"], v["avg"], v["win"], v["worst_mae"]] for k, v in sorted(gsl.items())],
@@ -1413,13 +1636,28 @@ def write_report(out_dir, label, eng, cfg, s, news_info, compare_rows=None, swee
         L.append("Parameter dicari HANYA di data awal (in-sample), lalu diuji di data akhir yang belum pernah dilihat "
                  "(out-of-sample). Edge yang asli harus tetap positif di kolom OOS.")
         L.append(table(wf_rows, ["Konfigurasi", "IS net", "IS DD", "IS RF", "OOS net", "OOS DD", "OOS RF", "OOS basket"]))
+    if robust:
+        verdict, checks, rows, mc = robust
+        L.append("")
+        L.append("## Uji ketahanan — vonis: **%s**" % verdict)
+        L.append(table([[name, "LULUS" if ok else "GAGAL", val] for name, ok, val in checks],
+                       ["Syarat", "Hasil", "Nilai"]))
+        L.append("")
+        L.append(table([[lab, r["net"], r["max_dd"], r["max_dd_pct"], r["profit_factor"], r["baskets"]] for lab, r in rows],
+                       ["Variasi", "Net", "Max DD", "DD%", "PF", "Basket"]))
+        if mc:
+            L.append("")
+            L.append("Monte Carlo (2000x bootstrap hasil basket): peluang rugi %.1f%%, net persentil-5 %.2f, "
+                     "median %.2f, DD median %.2f, DD persentil-95 %.2f. (Floating di dalam basket tidak ikut "
+                     "dihitung, jadi DD nyata bisa lebih besar.)" % (mc["p_rugi"], mc["net_p5"], mc["net_p50"],
+                                                                     mc["dd_p50"], mc["dd_p95"]))
     L.append("")
     L.append("## Catatan metodologi")
     L.append("- Replay ini meniru logika EA, bukan pengganti Strategy Tester MT5 (eksekusi, swap, margin, "
              "dan slippage broker nyata bisa berbeda).")
     L.append("- Data bar diubah jadi 4 tick per bar (O-L-H-C / O-H-L-C); hasil tick asli lebih akurat.")
-    L.append("- Bila jadwal berita dideteksi dari kejutan harga, hanya berita yang *menggerakkan* harga yang "
-             "tercatat. Ini bias ke berita besar; gunakan file kalender untuk hasil yang jujur.")
+    L.append("- Anti mengintip data depan: indikator hanya memakai bar yang sudah tutup; kejutan harga yang dideteksi "
+             "dari data TIDAK dipakai untuk keputusan trading (perisai berita hanya aktif dengan file kalender --news).")
     L.append("- Kinerja masa lalu tidak menjamin hasil masa depan.")
     path = os.path.join(out_dir, "laporan_forensik_%s.md" % label)
     with open(path, "w", encoding="utf-8") as fh:
@@ -1507,6 +1745,8 @@ def main(argv=None):
     ap.add_argument("--sweep", action="store_true", help="cari parameter terbaik (butuh RAM untuk data)")
     ap.add_argument("--walk-forward", type=float, metavar="FRAKSI",
                     help="mis. 0.7: cari parameter di 70%% data awal, uji di 30%% sisanya")
+    ap.add_argument("--ketahanan", action="store_true",
+                    help="uji ketahanan: stres biaya, sensitivitas parameter, per periode, Monte Carlo")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     ap.add_argument("--out", default="hasil_forensik")
     args = ap.parse_args(argv)
@@ -1528,19 +1768,31 @@ def main(argv=None):
 
     src = TickSource(infos, args.point, args.spread, parse_date(args.date_from), parse_date(args.date_to))
     cache = None
-    if args.sweep or args.walk_forward:
+    if args.sweep or args.walk_forward or args.ketahanan:
         print("Memuat data ke memori untuk sweep / walk-forward...")
-        cache = list(src)
+        # data kecil dimuat ke RAM (cepat); data besar (bertahun-tahun) dibaca ulang dari file oleh tiap proses
+        approx_rows = sum(os.path.getsize(i.path) for i in infos) / 60.0
+        if approx_rows * (4 if infos[0].kind == "bar" else 1) <= 6e6:
+            cache = list(src)
+        else:
+            print("  data besar: dibaca streaming dari file (hemat RAM)")
+            cache = src
         source = cache
     else:
         source = src
 
+    shocks = []
     if args.news:
         news = load_news_csv(args.news, args.news_currencies, args.news_medium, args.gmt_offset)
         news_info = "Berita: %d jadwal dari %s." % (len(news), os.path.basename(args.news))
     else:
-        news, nbars = infer_news(source, args.gmt_offset, args.infer_k)
-        news_info = "Berita: %d kejutan terdeteksi dari %d bar M1 (tanpa file kalender)." % (len(news), nbars)
+        # Kejutan yang dideteksi dari data itu sendiri TIDAK boleh dipakai untuk keputusan trading:
+        # itu sama dengan mengintip masa depan. Dipakai hanya sebagai label di laporan.
+        shocks, nbars = infer_news(source, args.gmt_offset, args.infer_k)
+        news = []
+        news_info = ("Tanpa file kalender: perisai & penunggang berita NONAKTIF di replay (anti mengintip data). "
+                     "%d kejutan harga terdeteksi dari %d bar M1, dipakai hanya sebagai label laporan."
+                     % (len(shocks), nbars))
     print(news_info)
 
     cfg = replace(Config(), **PRESETS[args.preset])
@@ -1579,12 +1831,20 @@ def main(argv=None):
 
     wf_rows = None
     if args.walk_forward:
-        import bisect
-        times = [x[0] for x in cache]
-        split_t = times[0] + (times[-1] - times[0]) * args.walk_forward
-        i = bisect.bisect_left(times, split_t)
-        is_ticks, oos_ticks = cache[:i], cache[i:]
-        print("Walk-forward: in-sample s/d %s, out-of-sample %d tick" % (ts_str(split_t), len(oos_ticks)))
+        first_t = last_t = None
+        for t, _b, _a in cache:
+            if first_t is None:
+                first_t = t
+            last_t = t
+        split_t = first_t + (last_t - first_t) * args.walk_forward
+        if isinstance(cache, list):
+            import bisect
+            i = bisect.bisect_left([x[0] for x in cache], split_t)
+            is_ticks, oos_ticks = cache[:i], cache[i:]
+        else:
+            is_ticks = TickSource(infos, args.point, args.spread, src.t_from, split_t)
+            oos_ticks = TickSource(infos, args.point, args.spread, split_t, src.t_to)
+        print("Walk-forward: in-sample s/d %s, sisanya out-of-sample" % ts_str(split_t))
         ranked = run_sweep(cfg, is_ticks, news, args, args.workers)
         argt = (args.gmt_offset, args.contract, args.balance, args.tick_size)
         candidates = [("default " + label, cfg, None)] + [
@@ -1600,7 +1860,19 @@ def main(argv=None):
                             r_oos["max_dd"], r_oos["recovery_factor"], r_oos["baskets"]])
             print("  %-40s IS %9.2f | OOS %9.2f" % (name, r_is["net"], r_oos["net"]))
 
-    path = write_report(args.out, label, eng, cfg, s, news_info, compare_rows, sweep_rows, wf_rows)
+    robust = None
+    if args.ketahanan:
+        rows = run_robust(cfg, cache, news, args, args.workers)
+        periods, _pn = period_stats(eng.records)
+        mc = monte_carlo(eng.records)
+        verdict, checks = robust_verdict(s, rows, periods, mc, args.balance)
+        robust = (verdict, checks, rows, mc)
+        print("VONIS KETAHANAN: %s" % verdict)
+        for name, ok, val in checks:
+            print("  [%s] %s: %s" % ("LULUS" if ok else "GAGAL", name, val))
+
+    path = write_report(args.out, label, eng, cfg, s, news_info, compare_rows, sweep_rows, wf_rows,
+                        shocks=shocks, robust=robust)
     with open(os.path.join(args.out, "ringkasan_%s.json" % label), "w", encoding="utf-8") as fh:
         json.dump({"config": asdict(cfg), "summary": s, "news_rides": eng.ride_log[:200]}, fh, indent=2, default=str)
     print("Laporan: %s" % path)
