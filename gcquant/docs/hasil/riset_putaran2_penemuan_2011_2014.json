@@ -1,0 +1,248 @@
+{
+ "mode": "discover",
+ "n_configs": 13,
+ "results": [
+  {
+   "family": "F1 momentum intraday",
+   "name": "r1",
+   "n": 921,
+   "mean": -0.1942,
+   "t": -2.12,
+   "gross_mean": 0.1587,
+   "gross_t": 1.73,
+   "total": -178.8,
+   "win": 44.3,
+   "pos_years": 0,
+   "years": 4,
+   "per_year": {
+    "2011": -17.4,
+    "2012": -57.2,
+    "2013": -18.8,
+    "2014": -85.3
+   }
+  },
+  {
+   "family": "F1 momentum intraday",
+   "name": "ron_r1",
+   "n": 919,
+   "mean": -0.0929,
+   "t": -1.02,
+   "gross_mean": 0.2603,
+   "gross_t": 2.85,
+   "total": -85.3,
+   "win": 44.8,
+   "pos_years": 1,
+   "years": 4,
+   "per_year": {
+    "2011": 30.6,
+    "2012": -16.2,
+    "2013": -60.8,
+    "2014": -38.9
+   }
+  },
+  {
+   "family": "F1 momentum intraday",
+   "name": "r1_big",
+   "n": 416,
+   "mean": -0.0911,
+   "t": -0.59,
+   "gross_mean": 0.2685,
+   "gross_t": 1.74,
+   "total": -37.9,
+   "win": 45.2,
+   "pos_years": 2,
+   "years": 4,
+   "per_year": {
+    "2011": 42.3,
+    "2012": -40.3,
+    "2013": 5.6,
+    "2014": -45.5
+   }
+  },
+  {
+   "family": "F2 London fix",
+   "name": "pm_fade_post",
+   "n": 938,
+   "mean": -0.269,
+   "t": -2.0,
+   "gross_mean": 0.0798,
+   "gross_t": 0.59,
+   "total": -252.3,
+   "win": 47.4,
+   "pos_years": 1,
+   "years": 4,
+   "per_year": {
+    "2011": -57.1,
+    "2012": 7.5,
+    "2013": -105.3,
+    "2014": -97.5
+   }
+  },
+  {
+   "family": "F2 London fix",
+   "name": "pm_follow_pre",
+   "n": 937,
+   "mean": -0.4341,
+   "t": -6.46,
+   "gross_mean": -0.0867,
+   "gross_t": -1.29,
+   "total": -406.7,
+   "win": 36.2,
+   "pos_years": 0,
+   "years": 4,
+   "per_year": {
+    "2011": -105.2,
+    "2012": -120.7,
+    "2013": -124.5,
+    "2014": -56.4
+   }
+  },
+  {
+   "family": "F2 London fix",
+   "name": "am_fade_post",
+   "n": 939,
+   "mean": -0.171,
+   "t": -2.57,
+   "gross_mean": 0.1655,
+   "gross_t": 2.48,
+   "total": -160.6,
+   "win": 45.0,
+   "pos_years": 0,
+   "years": 4,
+   "per_year": {
+    "2011": -24.0,
+    "2012": -18.5,
+    "2013": -59.1,
+    "2014": -58.9
+   }
+  },
+  {
+   "family": "F2 London fix",
+   "name": "am_follow_pre",
+   "n": 936,
+   "mean": -0.308,
+   "t": -7.88,
+   "gross_mean": 0.028,
+   "gross_t": 0.72,
+   "total": -288.3,
+   "win": 33.4,
+   "pos_years": 0,
+   "years": 4,
+   "per_year": {
+    "2011": -51.5,
+    "2012": -72.8,
+    "2013": -91.8,
+    "2014": -72.2
+   }
+  },
+  {
+   "family": "F3 gap akhir pekan",
+   "name": "gap_fade_60",
+   "n": 1,
+   "mean": -1.86,
+   "t": 0.0,
+   "gross_mean": -0.8,
+   "gross_t": 0,
+   "total": -1.9,
+   "win": 0.0,
+   "pos_years": 0,
+   "years": 1,
+   "per_year": {
+    "2012": -1.9
+   }
+  },
+  {
+   "family": "F3 gap akhir pekan",
+   "name": "gap_fade_240",
+   "n": 3,
+   "mean": 1.41,
+   "t": 0.64,
+   "gross_mean": 1.7933,
+   "gross_t": 0.81,
+   "total": 4.2,
+   "win": 33.3,
+   "pos_years": 1,
+   "years": 2,
+   "per_year": {
+    "2012": 5.8,
+    "2014": -1.6
+   }
+  },
+  {
+   "family": "F4 pergantian bulan",
+   "name": "tom_long",
+   "n": 40,
+   "mean": 1.5775,
+   "t": 0.37,
+   "gross_mean": 1.9963,
+   "gross_t": 0.47,
+   "total": 63.1,
+   "win": 47.5,
+   "pos_years": 1,
+   "years": 4,
+   "per_year": {
+    "2011": 212.3,
+    "2012": -116.8,
+    "2013": -12.5,
+    "2014": -19.9
+   }
+  },
+  {
+   "family": "F5 sesi",
+   "name": "asia_long",
+   "n": 812,
+   "mean": -0.1188,
+   "t": -0.42,
+   "gross_mean": 0.5892,
+   "gross_t": 2.1,
+   "total": -96.5,
+   "win": 51.2,
+   "pos_years": 1,
+   "years": 4,
+   "per_year": {
+    "2011": 132.9,
+    "2012": -69.0,
+    "2013": -59.2,
+    "2014": -101.2
+   }
+  },
+  {
+   "family": "F5 sesi",
+   "name": "us_short",
+   "n": 916,
+   "mean": -0.1487,
+   "t": -0.38,
+   "gross_mean": 0.2474,
+   "gross_t": 0.64,
+   "total": -136.2,
+   "win": 48.6,
+   "pos_years": 1,
+   "years": 4,
+   "per_year": {
+    "2011": 45.7,
+    "2012": -110.1,
+    "2013": -6.2,
+    "2014": -65.6
+   }
+  },
+  {
+   "family": "F6 pembukaan Shanghai",
+   "name": "sge_follow",
+   "n": 933,
+   "mean": -0.0436,
+   "t": -0.2,
+   "gross_mean": 0.3149,
+   "gross_t": 1.46,
+   "total": -40.7,
+   "win": 46.9,
+   "pos_years": 2,
+   "years": 4,
+   "per_year": {
+    "2011": 52.8,
+    "2012": 69.5,
+    "2013": -76.7,
+    "2014": -86.3
+   }
+  }
+ ]
+}
